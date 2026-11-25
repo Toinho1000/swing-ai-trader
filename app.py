@@ -2,199 +2,169 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests
 from datetime import date
 
-st.set_page_config(
-    page_title="SWING AI TRADER",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="SWING AI TRADER", page_icon="📈", layout="wide")
+st.title("📈 SWING AI TRADER")
+st.caption("Versão 2.0 • consulta de dados e simulação educativa")
+st.warning("MODO EDUCATIVO: dados consultados via brapi podem ter atraso e limitações. Não são recomendações. Este app não se conecta a corretoras nem executa ordens.")
 
-st.markdown("""
-<style>
-.block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1400px;}
-[data-testid="stMetric"] {background: #111827; border: 1px solid #263244; padding: 12px; border-radius: 12px;}
-.small-note {color:#9CA3AF; font-size:0.85rem;}
-.stTabs [data-baseweb="tab-list"] {gap: 8px;}
-.stTabs [data-baseweb="tab"] {padding: 8px 14px;}
-</style>
-""", unsafe_allow_html=True)
+API = "https://brapi.dev/api/v2"
+TICKERS = ["PETR4", "VALE3", "MGLU3", "ITUB4"]
 
-# All values in this first prototype are generated demo data.
-TICKERS = ["PETR4", "VALE3", "ITUB4", "BBAS3", "BBDC4", "ABEV3"]
-SEED = 17
+def token():
+    try:
+        return st.secrets.get("BRAPI_TOKEN", "")
+    except Exception:
+        return ""
 
-@st.cache_data
-def make_demo_data(ticker: str, days: int = 260):
-    rng = np.random.default_rng(SEED + sum(ord(c) for c in ticker))
-    dates = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=days)
-    drift = 0.00025
-    shocks = rng.normal(drift, 0.014, days)
-    start = {"PETR4": 36, "VALE3": 62, "ITUB4": 34, "BBAS3": 27, "BBDC4": 15, "ABEV3": 13}[ticker]
-    close = start * np.exp(np.cumsum(shocks))
-    open_ = np.r_[close[0], close[:-1]] * (1 + rng.normal(0, 0.004, days))
-    high = np.maximum(open_, close) * (1 + rng.uniform(0.001, 0.012, days))
-    low = np.minimum(open_, close) * (1 - rng.uniform(0.001, 0.012, days))
-    volume = rng.integers(1_000_000, 12_000_000, days)
-    df = pd.DataFrame({"Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume}, index=dates)
-    df["MM20"] = df["Close"].rolling(20).mean()
-    df["MM50"] = df["Close"].rolling(50).mean()
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
+def get(path, params):
+    headers = {}
+    t = token()
+    if t:
+        headers["Authorization"] = f"Bearer {t}"
+    r = requests.get(f"{API}/{path}", params=params, headers=headers, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+@st.cache_data(ttl=900)
+def quote(ticker):
+    data = get("stocks/quote", {"symbols": ticker}).get("results", [])
+    if not data:
+        raise ValueError("Cotação indisponível para este ativo.")
+    return data[0].get("data", {})
+
+@st.cache_data(ttl=3600)
+def history(ticker):
+    data = get("stocks/historical", {
+        "symbols": ticker, "range": "3mo", "interval": "1d", "sortOrder": "asc"
+    }).get("results", [])
+    if not data:
+        raise ValueError("Histórico indisponível para este ativo.")
+    rows = data[0].get("data", {}).get("historicalDataPrice", [])
+    if not rows:
+        raise ValueError("A API retornou histórico vazio.")
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["date"], unit="s", errors="coerce")
+    df = df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
+    for c in ["Open","High","Low","Close","Volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["Date","Open","High","Low","Close"]).sort_values("Date").set_index("Date")
+    df["MM20"] = df.Close.rolling(20).mean()
+    df["MM50"] = df.Close.rolling(50).mean()
+    d = df.Close.diff()
+    gain, loss = d.clip(lower=0).rolling(14).mean(), -d.clip(upper=0).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
-    df["RSI14"] = 100 - (100 / (1 + rs))
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["RSI14"] = 100 - 100/(1+rs)
+    e12, e26 = df.Close.ewm(span=12, adjust=False).mean(), df.Close.ewm(span=26, adjust=False).mean()
+    df["MACD"] = e12-e26
+    df["MACD_signal"] = df.MACD.ewm(span=9, adjust=False).mean()
     return df
 
-def brl(value):
-    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-st.title("📈 SWING AI TRADER")
-st.caption("Painel educativo de análise e simulação • versão 1.0")
-
-st.warning(
-    "MODO DEMONSTRAÇÃO: os preços e gráficos desta versão são fictícios e gerados pelo programa. "
-    "Não são cotações reais, recomendações de investimento nem sinais para operar. "
-    "Não há conexão com corretoras ou execução de ordens.",
-    icon="⚠️"
-)
+def brl(v):
+    if v is None or pd.isna(v): return "—"
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 with st.sidebar:
-    st.header("Configurações")
-    ticker = st.selectbox("Ativo demonstrativo", TICKERS, index=0)
-    periodo = st.selectbox("Janela do gráfico", ["3 meses", "6 meses", "1 ano"], index=2)
-    st.divider()
-    st.caption("Projeto educacional. Não informe senhas, CPF ou dados bancários aqui.")
+    st.header("Ativo em estudo")
+    ticker = st.selectbox("Ação da B3", TICKERS)
+    st.caption("A documentação da brapi informa acesso de teste sem token para estes quatro ativos.")
+    if st.button("Atualizar dados"):
+        st.cache_data.clear()
+        st.rerun()
+    st.caption("Não insira senhas de corretora, CPF ou dados bancários.")
 
-df = make_demo_data(ticker)
-window = {"3 meses": 65, "6 meses": 130, "1 ano": 260}[periodo]
-view = df.tail(window).copy()
-last = df.iloc[-1]
-prev = df.iloc[-2]
-variation = (last["Close"] / prev["Close"] - 1) * 100
+try:
+    with st.spinner("Consultando provedor de dados..."):
+        q = quote(ticker)
+        df = history(ticker)
+    ok = True
+except requests.exceptions.HTTPError as e:
+    ok = False
+    st.error(f"Falha HTTP ao consultar a API ({e.response.status_code if e.response is not None else 'sem código'}). Confira limites e disponibilidade.")
+except requests.exceptions.RequestException:
+    ok = False
+    st.error("Não foi possível conectar ao provedor. Verifique a internet e tente novamente.")
+except (ValueError, KeyError, TypeError):
+    ok = False
+    st.error("A fonte não retornou dados válidos para esta consulta.")
 
-# Educational classification, not a trade signal.
-if pd.notna(last["MM20"]) and pd.notna(last["MM50"]):
-    if last["Close"] > last["MM20"] > last["MM50"]:
-        condition = "Tendência demonstrativa positiva"
-    elif last["Close"] < last["MM20"] < last["MM50"]:
-        condition = "Tendência demonstrativa negativa"
+if ok:
+    last = df.iloc[-1]
+    price = q.get("regularMarketPrice", last.Close)
+    change = q.get("regularMarketChangePercent")
+    if change is None and len(df)>1:
+        change = (last.Close/df.iloc[-2].Close-1)*100
+    if pd.notna(last.MM20) and pd.notna(last.MM50):
+        trend = "Positiva (critério didático)" if last.Close>last.MM20>last.MM50 else ("Negativa (critério didático)" if last.Close<last.MM20<last.MM50 else "Mista / sem confirmação")
     else:
-        condition = "Cenário misto / sem confirmação"
+        trend = "Histórico insuficiente"
+
+    a,b,c,d = st.columns(4)
+    a.metric("Ativo", ticker, "B3")
+    b.metric("Último preço informado", brl(price), f"{float(change):+.2f}%" if change is not None else None)
+    c.metric("RSI (14)", f"{last.RSI14:.1f}" if pd.notna(last.RSI14) else "—")
+    d.metric("Leitura técnica", trend)
+    st.caption(f"Horário informado pelo provedor: {q.get('regularMarketTime','não informado')}. Histórico: {df.index.min().date()} a {df.index.max().date()}.")
+
+    t1,t2,t3,t4 = st.tabs(["📊 Mercado","🧠 Análise","🧪 Simulador","📘 Como usar"])
+    with t1:
+        fig=go.Figure()
+        fig.add_trace(go.Candlestick(x=df.index,open=df.Open,high=df.High,low=df.Low,close=df.Close,name="Preço"))
+        fig.add_trace(go.Scatter(x=df.index,y=df.MM20,name="Média móvel 20"))
+        fig.add_trace(go.Scatter(x=df.index,y=df.MM50,name="Média móvel 50"))
+        fig.update_layout(height=420,template="plotly_dark",xaxis_rangeslider_visible=False,margin=dict(l=8,r=8,t=25,b=8))
+        st.plotly_chart(fig,use_container_width=True)
+        vf=go.Figure(go.Bar(x=df.index,y=df.Volume,name="Volume"))
+        vf.update_layout(height=180,template="plotly_dark",margin=dict(l=8,r=8,t=20,b=8))
+        st.plotly_chart(vf,use_container_width=True)
+        st.caption("Dados fornecidos pela brapi; podem ter atraso, limites ou indisponibilidade.")
+
+    with t2:
+        x,y=st.columns(2)
+        x.metric("Média móvel 20",brl(last.MM20))
+        x.metric("Média móvel 50",brl(last.MM50))
+        y.metric("MACD",f"{last.MACD:.3f}" if pd.notna(last.MACD) else "—")
+        y.metric("Sinal MACD",f"{last.MACD_signal:.3f}" if pd.notna(last.MACD_signal) else "—")
+        st.info(f"Leitura: {trend}. Isso é uma classificação técnica simples, não sinal de compra ou venda.")
+        st.write("RSI, médias móveis e MACD podem gerar leituras falsas. Considere contexto, liquidez, custos e incerteza.")
+
+    with t3:
+        st.subheader("Simulador educativo — valores hipotéticos")
+        x,y,z=st.columns(3)
+        capital=x.number_input("Capital fictício (R$)",100.0,1000000.0,10000.0,500.0)
+        risk=y.slider("Risco hipotético (%)",0.25,2.0,1.0,0.25)
+        stop=z.slider("Distância hipotética do stop (%)",1.0,15.0,5.0,0.5)
+        loss=capital*risk/100
+        exposure=loss/(stop/100)
+        x,y,z=st.columns(3)
+        x.metric("Perda planejada",brl(loss))
+        y.metric("Exposição teórica",brl(exposure))
+        z.metric("Capital exposto",f"{exposure/capital*100:.1f}%")
+        st.caption("Cálculo simplificado; não inclui gaps, taxas, impostos ou slippage. Não é recomendação de tamanho de posição.")
+        if "journal" not in st.session_state: st.session_state.journal=[]
+        with st.form("journal"):
+            scenario=st.selectbox("Cenário observado",["Hipótese de alta","Hipótese de baixa","Sem operação"])
+            note=st.text_input("Observação (opcional)")
+            submit=st.form_submit_button("Registrar cenário fictício")
+        if submit:
+            st.session_state.journal.append({"Data":date.today().strftime("%d/%m/%Y"),"Ativo":ticker,"Cenário":scenario,"Observação":note or "—"})
+        if st.session_state.journal:
+            st.dataframe(pd.DataFrame(st.session_state.journal),use_container_width=True,hide_index=True)
+
+    with t4:
+        st.markdown("""
+        1. Selecione um ativo no menu lateral.
+        2. Confira a data e o horário dos dados.
+        3. Estude o gráfico e os indicadores sem tratá-los como previsões.
+        4. Registre hipóteses no simulador.
+
+        **Limitações:** a API tem limites e pode fornecer dados atrasados. Esta versão não usa IA preditiva, não executa ordens e não se conecta a corretoras.
+        """)
+
 else:
-    condition = "Dados insuficientes"
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Ativo em estudo", ticker, "Dado fictício")
-c2.metric("Último preço demonstrativo", brl(float(last["Close"])), f"{variation:+.2f}%")
-c3.metric("RSI (14)", f"{last['RSI14']:.1f}" if pd.notna(last["RSI14"]) else "—")
-c4.metric("Condição técnica", condition, help="Classificação didática baseada em médias móveis; não é recomendação.")
-
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Mercado", "🧠 Análise", "🧪 Simulador", "📘 Como usar"])
-
-with tab1:
-    st.subheader(f"{ticker} • histórico fictício")
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=view.index, open=view["Open"], high=view["High"],
-        low=view["Low"], close=view["Close"], name="Preço demonstrativo"
-    ))
-    fig.add_trace(go.Scatter(x=view.index, y=view["MM20"], name="Média móvel 20", line=dict(width=1.5)))
-    fig.add_trace(go.Scatter(x=view.index, y=view["MM50"], name="Média móvel 50", line=dict(width=1.5)))
-    fig.update_layout(
-        height=430, template="plotly_dark", xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=25, b=10), legend=dict(orientation="h", y=1.02)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    vol_fig = go.Figure(go.Bar(x=view.index, y=view["Volume"], name="Volume fictício"))
-    vol_fig.update_layout(height=190, template="plotly_dark", margin=dict(l=10,r=10,t=20,b=10))
-    st.plotly_chart(vol_fig, use_container_width=True)
-    st.caption("Série sintética criada apenas para demonstrar a interface. Não representa o histórico real do ativo.")
-
-with tab2:
-    st.subheader("Leitura técnica demonstrativa")
-    a, b = st.columns(2)
-    with a:
-        st.metric("Média móvel de 20 períodos", brl(float(last["MM20"])))
-        st.metric("Média móvel de 50 períodos", brl(float(last["MM50"])))
-        st.metric("MACD", f"{last['MACD']:.3f}")
-    with b:
-        st.metric("Sinal MACD", f"{last['MACD_signal']:.3f}")
-        st.metric("RSI (14)", f"{last['RSI14']:.1f}")
-        st.metric("Volume fictício", f"{int(last['Volume']):,}".replace(",", "."))
-    st.info(
-        f"Resumo didático: {condition}. Indicadores isolados não preveem o futuro. "
-        "Uma análise adequada também considera contexto, liquidez, custos, notícias e risco."
-    )
-    st.markdown("**Como interpretar com cautela**")
-    st.write("- RSI é um indicador de força relativa; leituras extremas não garantem reversão.")
-    st.write("- Médias móveis ajudam a visualizar tendências, mas podem atrasar em mudanças rápidas.")
-    st.write("- MACD compara médias móveis e pode gerar sinais falsos em mercados laterais.")
-
-with tab3:
-    st.subheader("Simulador educativo de posição")
-    st.caption("Use valores hipotéticos. Nada será enviado a uma corretora.")
-    x1, x2, x3 = st.columns(3)
-    with x1:
-        saldo = st.number_input("Capital fictício (R$)", min_value=100.0, max_value=1_000_000.0, value=10000.0, step=500.0)
-    with x2:
-        risco_pct = st.slider("Risco hipotético por cenário (%)", 0.25, 2.0, 1.0, 0.25)
-    with x3:
-        distancia_pct = st.slider("Distância hipotética até o stop (%)", 1.0, 15.0, 5.0, 0.5)
-    perda_max = saldo * risco_pct / 100
-    exposicao = perda_max / (distancia_pct / 100)
-    st.divider()
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Perda planejada no cenário", brl(perda_max))
-    r2.metric("Exposição teórica correspondente", brl(exposicao))
-    r3.metric("Percentual do capital exposto", f"{(exposicao/saldo)*100:.1f}%")
-    st.caption(
-        "Cálculo ilustrativo simplificado: exposição = perda planejada ÷ distância percentual do stop. "
-        "Não inclui gaps, slippage, taxas, impostos ou mudanças de preço; não é indicação de tamanho de posição."
-    )
-    st.markdown("**Diário de simulação**")
-    if "journal" not in st.session_state:
-        st.session_state.journal = []
-    with st.form("trade_form"):
-        lado = st.selectbox("Cenário", ["Hipótese de alta", "Hipótese de baixa", "Sem operação"])
-        observacao = st.text_input("Observação (opcional)", placeholder="Ex.: tendência ainda sem confirmação")
-        submitted = st.form_submit_button("Registrar cenário fictício")
-    if submitted:
-        st.session_state.journal.append({
-            "Data": date.today().strftime("%d/%m/%Y"),
-            "Ativo": ticker,
-            "Cenário": lado,
-            "Observação": observacao or "—"
-        })
-    if st.session_state.journal:
-        st.dataframe(pd.DataFrame(st.session_state.journal), use_container_width=True, hide_index=True)
-        if st.button("Limpar diário desta sessão"):
-            st.session_state.journal = []
-            st.rerun()
-    else:
-        st.caption("Nenhum cenário registrado nesta sessão.")
-
-with tab4:
-    st.subheader("Primeiros passos")
-    st.markdown("""
-    1. Escolha um ativo demonstrativo no menu lateral.
-    2. Observe o gráfico e as médias móveis.
-    3. Leia os indicadores sem tratá-los como previsões.
-    4. Teste valores hipotéticos no simulador.
-    5. Registre cenários e avalie as limitações.
-
-    **Próximas melhorias possíveis**
-    - Integração com uma fonte licenciada/confiável de dados de mercado, em modo somente leitura.
-    - Backtesting com separação entre dados de treino e teste.
-    - Inclusão de custos, liquidez e eventos corporativos.
-    - Relatórios de drawdown, volatilidade e retorno ajustado ao risco.
-    """)
-    st.info("A primeira versão não usa aprendizado de máquina para prever preços. A prioridade é validar dados, cálculos e interface antes de acrescentar modelos de IA.")
+    st.info("Nenhum preço fictício será mostrado como se fosse real. Quando a fonte falhar, os dados ficam ocultos.")
 
 st.divider()
-st.caption("SWING AI TRADER • Protótipo educacional v1.0 • Sem conexão com corretoras • Sem aconselhamento financeiro")
+st.caption("SWING AI TRADER • V2.0 • Consulta de dados + simulação educativa • Sem conexão com corretoras")

@@ -1,30 +1,20 @@
-# SWING AI TRADER — versão 2.0
+# SWING AI TRADER V2.0
 
-Protótipo educativo responsivo para navegador e celular.
+Painel educativo para consultar cotações e histórico de ações brasileiras pela API brapi e estudar indicadores.
 
-## Importante
-- Todos os preços e volumes são **fictícios**, gerados localmente.
-- Não representa cotações reais da B3.
-- Não gera recomendações de compra/venda.
-- Não se conecta a corretoras e não executa ordens.
-- O simulador usa valores hipotéticos e não substitui orientação financeira.
+- Sem conexão com corretoras e sem execução de ordens.
+- Não é recomendação de investimento.
+- Dados podem ter atraso, limites ou indisponibilidade.
+- A documentação da brapi informa que o plano gratuito inclui 15.000 requisições/mês, até 3 meses de histórico e atualização aproximada de 30 minutos; confira os termos atuais.
+- Teste sem token documentado para PETR4, VALE3, MGLU3 e ITUB4.
+- Não coloque tokens ou senhas no código público.
 
-## Executar no computador
+## Atualização no GitHub
+Substitua `app.py` e `requirements.txt` na raiz do repositório pelos arquivos desta versão e faça Commit changes. O Streamlit detectará a alteração e reiniciará o app.
 
-1. Instale Python 3.10 ou superior.
-2. Abra o terminal na pasta do projeto.
-3. Crie um ambiente virtual (opcional, recomendado):
-   `python -m venv .venv`
-4. Ative o ambiente virtual.
-5. Instale as dependências:
-   `pip install -r requirements.txt`
-6. Inicie:
-   `streamlit run app.py`
-7. Abra o endereço local mostrado no terminal.
+## Execução local
+`pip install -r requirements.txt`
+`streamlit run app.py`
 
-## Usar no celular
-O Streamlit adapta a interface à tela. Para acessar pelo celular, o aplicativo precisa estar hospedado em um serviço compatível com Streamlit; não basta abrir o arquivo ZIP no celular.
-
-## Conteúdo
-- `app.py`: aplicação.
-- `requirements.txt`: dependências.
+Documentação: https://brapi.dev/docs
+Histórico: https://brapi.dev/docs/acoes/historico
