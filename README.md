@@ -1,4 +1,4 @@
-# SWING AI TRADER — versão 1.0
+# SWING AI TRADER — versão 2.0
 
 Protótipo educativo responsivo para navegador e celular.
 
